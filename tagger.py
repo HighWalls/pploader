@@ -1,8 +1,15 @@
-"""Write ID3 tags that Rekordbox reads: TBPM, TKEY (Camelot), TIT2, TPE1, TALB, COMM."""
+"""Write ID3 tags that DJ software reads: TBPM, TKEY, TIT2, TPE1, TALB, COMM.
+
+TKEY format is configurable: 'camelot' (e.g. '8A') for Rekordbox, or
+'musical' (e.g. 'Am') for Traktor / Serato. The COMM field always carries
+both formats so the file is portable across software.
+"""
 
 from pathlib import Path
 
 from mutagen.id3 import COMM, ID3, ID3NoHeaderError, TALB, TBPM, TIT2, TKEY, TPE1
+
+from camelot import musical_key_short
 
 
 def tag_file(
@@ -14,6 +21,7 @@ def tag_file(
     bpm: int,
     camelot: str,
     key_name: str,
+    key_format: str = "camelot",
 ) -> None:
     try:
         tags = ID3(mp3_path)
@@ -24,8 +32,8 @@ def tag_file(
     tags["TPE1"] = TPE1(encoding=3, text=artist)
     tags["TALB"] = TALB(encoding=3, text=album)
     tags["TBPM"] = TBPM(encoding=3, text=str(bpm))
-    # Rekordbox reads TKEY and displays it in the Key column as-is. Camelot sorts nicely.
-    tags["TKEY"] = TKEY(encoding=3, text=camelot)
+    tkey_value = musical_key_short(key_name) if key_format == "musical" else camelot
+    tags["TKEY"] = TKEY(encoding=3, text=tkey_value)
     tags["COMM"] = COMM(
         encoding=3, lang="eng", desc="", text=f"{camelot} | {bpm} BPM | {key_name}"
     )

@@ -1,14 +1,16 @@
-"""Spotify / YouTube / SoundCloud URL → MP3 downloads with BPM + Camelot key tags.
+"""Spotify / YouTube / SoundCloud URL → MP3 downloads with BPM + key tags.
 
 Accepts playlist URLs (all three platforms) or single track / video URLs
 (Spotify track, YouTube video, SoundCloud track). Singles land in a `singles/`
-subfolder under --out.
+subfolder under --out. Key format in tags + filename is selectable (Camelot
+for Rekordbox, musical notation for Traktor / Serato).
 
 Usage:
     python main.py <url>
         [--sources youtube,soundcloud] [--out DIR]
         [--limit N] [--skip-existing]
         [--bucket-by-bpm] [--reanalyze]
+        [--key-format camelot|musical]
 """
 
 import argparse
@@ -30,6 +32,7 @@ from mutagen.id3 import ID3, ID3NoHeaderError
 from tqdm import tqdm
 
 from analyzer import analyze
+from camelot import musical_key_short
 from downloader import download_track, download_url
 from spotify_client import Track, get_playlist_tracks, get_track
 from tagger import tag_file
@@ -82,13 +85,20 @@ def safe_replace(src: Path, dst: Path, retries: int = 6, delay: float = 0.5) -> 
 
 
 def process_track(
-    track: Track, out_dir: Path, sources: list[str], bucket_by_bpm: bool = False
+    track: Track,
+    out_dir: Path,
+    sources: list[str],
+    bucket_by_bpm: bool = False,
+    key_format: str = "camelot",
 ) -> dict | None:
     """Download track, analyze, tag, rename. Returns None if no source matched.
 
     Tracks with a `source_url` (YouTube / SoundCloud playlist entries) download
     directly from that URL. Tracks without one (Spotify entries) fall back to
     title-based search across the configured sources in order.
+
+    `key_format` ('camelot' or 'musical') controls the value written to the
+    ID3 TKEY frame and the filename's key prefix.
     """
     tmp_dir = out_dir / "_tmp"
     downloaded: Path | None = None
@@ -124,9 +134,11 @@ def process_track(
             bpm=result.bpm,
             camelot=result.camelot,
             key_name=result.key_name,
+            key_format=key_format,
         )
+        prefix = _key_prefix(result.camelot, result.key_name, key_format)
         final_name = safe_filename(
-            f"{result.camelot} - {result.bpm:03d} - {track.primary_artist} - {track.title}"
+            f"{prefix} - {result.bpm:03d} - {track.primary_artist} - {track.title}"
         ) + ".mp3"
     else:
         final_name = safe_filename(f"{track.primary_artist} - {track.title}") + ".mp3"
@@ -215,15 +227,23 @@ def _row_bpm_int(row: dict) -> int | None:
         return None
 
 
-def _expected_filename(row: dict) -> str | None:
-    """Canonical filename for a row based on its current camelot/bpm/artist/title."""
+def _key_prefix(camelot: str, key_name: str, key_format: str) -> str:
+    """The string used as the filename's leading key chunk: '8A' or 'Am'."""
+    if key_format == "musical" and key_name:
+        return musical_key_short(key_name)
+    return camelot
+
+
+def _expected_filename(row: dict, key_format: str = "camelot") -> str | None:
+    """Canonical filename for a row based on its current key/bpm/artist/title."""
     camelot = row.get("camelot") or ""
     bpm_int = _row_bpm_int(row)
     artist = row.get("artist", "")
     title = row.get("title", "")
     if not (camelot and bpm_int is not None and artist and title):
         return None
-    return safe_filename(f"{camelot} - {bpm_int:03d} - {artist} - {title}") + ".mp3"
+    prefix = _key_prefix(camelot, row.get("key", "") or "", key_format)
+    return safe_filename(f"{prefix} - {bpm_int:03d} - {artist} - {title}") + ".mp3"
 
 
 def _find_disk_file(row: dict, by_name: dict[str, Path], all_paths: list[Path]) -> Path | None:
@@ -243,9 +263,9 @@ def _find_disk_file(row: dict, by_name: dict[str, Path], all_paths: list[Path]) 
     return None
 
 
-def reanalyze_rows(rows: list[dict], out_dir: Path) -> int:
+def reanalyze_rows(rows: list[dict], out_dir: Path, key_format: str = "camelot") -> int:
     """Re-run BPM/key analysis on each row's MP3. Updates the row dict in place,
-    rewrites ID3 tags, and renames the file if the camelot/bpm prefix changed.
+    rewrites ID3 tags, and renames the file if the key/bpm prefix changed.
     Returns the count of rows whose values actually changed."""
     all_paths = list(out_dir.rglob("*.mp3"))
     by_name: dict[str, Path] = {p.name: p for p in all_paths}
@@ -270,13 +290,15 @@ def reanalyze_rows(rows: list[dict], out_dir: Path) -> int:
                 bpm=result.bpm,
                 camelot=result.camelot,
                 key_name=result.key_name,
+                key_format=key_format,
             )
         except Exception as e:
             tqdm.write(f"  ! retag failed ({e}): {current.name}")
             continue
+        prefix = _key_prefix(result.camelot, result.key_name, key_format)
         new_name = (
             safe_filename(
-                f"{result.camelot} - {result.bpm:03d} - "
+                f"{prefix} - {result.bpm:03d} - "
                 f"{row.get('artist', '')} - {row.get('title', '')}"
             )
             + ".mp3"
@@ -326,6 +348,14 @@ def main() -> int:
         action="store_true",
         help="Re-run BPM/key analysis on existing MP3s (for fixing prior half-time errors). "
              "Implies --skip-existing.",
+    )
+    ap.add_argument(
+        "--key-format",
+        choices=["camelot", "musical"],
+        default="camelot",
+        help="Key format for the ID3 TKEY tag and filename prefix. "
+             "'camelot' (default, Rekordbox) writes '8A'. "
+             "'musical' (Traktor / Serato) writes 'Am'.",
     )
     args = ap.parse_args()
     if args.reanalyze:
@@ -388,7 +418,7 @@ def main() -> int:
 
     if args.reanalyze and existing:
         print(f"Reanalyzing {len(existing)} existing tracks...")
-        n_changed = reanalyze_rows(list(existing.values()), out_dir)
+        n_changed = reanalyze_rows(list(existing.values()), out_dir, key_format=args.key_format)
         print(f"  → {n_changed}/{len(existing)} rows updated")
 
     rows: list[dict] = list(existing.values())
@@ -397,7 +427,13 @@ def main() -> int:
 
     for track in tqdm(to_process, desc="Processing"):
         tqdm.write(f"→ {track.search_query}")
-        row = process_track(track, out_dir, sources, bucket_by_bpm=args.bucket_by_bpm)
+        row = process_track(
+            track,
+            out_dir,
+            sources,
+            bucket_by_bpm=args.bucket_by_bpm,
+            key_format=args.key_format,
+        )
         if row:
             rows.append(row)
         else:
@@ -435,13 +471,14 @@ def main() -> int:
                         bpm=bpm_int,
                         camelot=row["camelot"],
                         key_name=row.get("key", "") or "",
+                        key_format=args.key_format,
                     )
                     retagged += 1
                 except Exception as e:
                     tqdm.write(f"  ! retag failed ({e}): {current.name}")
                     continue
             # Rename the file to the canonical name for its row values.
-            expected_name = _expected_filename(row) or current.name
+            expected_name = _expected_filename(row, key_format=args.key_format) or current.name
             if current.name != expected_name:
                 new_path = current.parent / expected_name
                 try:

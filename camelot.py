@@ -19,3 +19,13 @@ def to_camelot(root: str, mode: str) -> str:
 
 def pc_to_name(pc: int) -> str:
     return NOTE_NAMES[pc % 12]
+
+
+def musical_key_short(key_name: str) -> str:
+    """Convert 'A minor' / 'C major' / 'C# minor' to ID3 TKEY format
+    ('Am' / 'C' / 'C#m'). Format expected by Traktor / Serato displays."""
+    parts = key_name.split()
+    if len(parts) != 2:
+        return key_name
+    root, mode = parts
+    return root if mode == "major" else f"{root}m"

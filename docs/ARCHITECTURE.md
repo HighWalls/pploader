@@ -86,12 +86,16 @@ Two entry points sharing yt-dlp configuration via `_base_opts(out_dir)`:
 
 ### `tagger.py`
 
-- `tag_file(mp3_path, ...)` — writes `TIT2` (title), `TPE1` (artist), `TALB` (album), `TBPM` (int string), `TKEY` (Camelot), `COMM` (human-readable summary).
+- `tag_file(mp3_path, ..., key_format="camelot")` — writes `TIT2` (title), `TPE1` (artist), `TALB` (album), `TBPM` (int string), `TKEY`, and `COMM` (human-readable summary).
+- `key_format` selects what goes into `TKEY`: `"camelot"` writes the Camelot value (`"8A"`, default; what Rekordbox expects), `"musical"` writes the short musical form (`"Am"`, what Traktor / Serato display by default). The COMM frame always contains the full string `f"{camelot} | {bpm} BPM | {key_name}"` regardless of choice — so the file stays portable across DJ software.
+- The musical form comes from `camelot.musical_key_short(key_name)`: `"A minor" -> "Am"`, `"C major" -> "C"`, `"C# minor" -> "C#m"`. Format expected by ID3v2.3 spec for `TKEY`.
 - Saves as ID3v2.3 (`v2_version=3`) — Rekordbox supports both v2.3 and v2.4 but v2.3 has wider compatibility.
 - Creates new `ID3()` if the file has no header (fresh MP3 from yt-dlp often does). Catches `ID3NoHeaderError` only — other errors should propagate.
 
 ### `main.py`
 
+- `--key-format {camelot,musical}` — flag forwarded to `process_track`, `reanalyze_rows`, and the bucket-sync re-tag pass. Picks both the `TKEY` value and the leading filename chunk (`8A - 128 - …` vs `Am - 128 - …`).
+- `_key_prefix(camelot, key_name, key_format)` — single source of truth for the filename's leading chunk. Used in process_track, reanalyze_rows, and `_expected_filename`. Switch the format on a re-run with `--key-format`, run with `--bucket-by-bpm`, and the bucket-sync pass renames every existing file to match (using `_find_disk_file`'s artist/title fallback to locate files whose key prefix differs from what the CSV records).
 - `safe_filename(s)` — strips characters illegal on Windows (`<>:"/\|?*` + control chars), truncates to 120 chars. Don't shorten further; collisions with long track names become likely.
 - `safe_replace(src, dst)` — `os.replace()` with retries. Windows antivirus/indexer briefly locks freshly-written MP3s and throws `PermissionError`; retrying after 0.5s resolves it.
 - `process_track(track, out_dir, sources)` — iterates `sources` (list), first hit wins. Returns a CSV row dict with the successful `source` recorded, or `None` if no source matched. Failed analysis still produces a (less useful) row — the file is kept but untagged and named `"Artist - Title.mp3"`.
