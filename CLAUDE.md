@@ -22,7 +22,8 @@ python main.py <url>
     [--skip-existing]                # skip tracks already in index.csv or on disk
     [--bucket-by-bpm]                # group into BPM-range subfolders + re-tag from CSV
     [--reanalyze]                    # re-run BPM/key on existing MP3s (implies --skip-existing)
-    [--key-format camelot|musical]   # TKEY + filename prefix: '8A' (Rekordbox) or 'Am' (Traktor/Serato)
+    [--key-format camelot|musical]   # TKEY + filename prefix for NEW downloads
+    [--migrate-keys]                 # opt-in: also rewrite existing files to --key-format
 ```
 
 `<url>` can be a playlist or single-track URL on Spotify, YouTube, or SoundCloud.
@@ -47,7 +48,14 @@ Tracks that fail on every source are written to `failures.txt` alongside `index.
 
 ## Conventions
 
-- **Default target: Rekordbox.** `TKEY` holds Camelot notation (`"8A"`) by default. Switch with `--key-format musical` to write musical notation (`"Am"`) for Traktor / Serato users. The COMM frame *always* carries both forms (`"8A | 128 BPM | A minor"`) so the file stays portable across DJ software regardless of the chosen TKEY format. The CSV `index.csv` also keeps both `camelot` and `key` columns populated.
+- **Both key formats are always written to ID3.** Every tagged file gets:
+  - `TKEY` = whichever the user picked (`"8A"` or `"Am"`) — primary frame Rekordbox/Traktor/Serato display.
+  - `TXXX:CAMELOT_KEY` = always Camelot (regardless of choice).
+  - `TXXX:MUSICAL_KEY` = always musical (regardless of choice).
+  - `COMM` = both, human-readable: `"8A | 128 BPM | A minor"`.
+  This way the file is portable across any DJ software no matter the user's choice — every tool can find what it wants in *some* frame.
+- **Default target: Rekordbox.** `TKEY` defaults to Camelot (`"8A"`). `--key-format musical` writes `"Am"` for Traktor / Serato users. The CSV `index.csv` also keeps both `camelot` and `key` columns populated.
+- **Changing `--key-format` only affects NEW downloads.** Existing files keep their current TKEY format and filename prefix on subsequent syncs. To rewrite an entire library to the new format, pass `--migrate-keys` explicitly. The bucket-sync rename pass treats both `8A - 128 - …` and `Am - 128 - …` as valid filenames for the same row, so toggling `--key-format` on a re-run doesn't cascade-rename files.
 - **BPM is stored as int string in `TBPM`** (Rekordbox convention). The half/double-time normalizer in `analyzer.py` clamps to 70–180 BPM — this is intentional for DJ use, not a bug.
 - **Filename pattern:** `{camelot} - {bpm:03d} - {artist} - {title}.mp3`. Sorts nicely in file browsers and doubles as a visual fallback if tags get stripped.
 - **BPM bucketing (`--bucket-by-bpm`).** Anchor band is `115-125` (11 wide, DJ-idiomatic), everything else is 10-wide: `126-135`, `136-145`, ..., `105-114`, `95-104`, etc. No-BPM tracks go to `unknown-bpm/`. The bucket name is derived from BPM each time — rerunning with `--skip-existing --bucket-by-bpm` reorganizes existing files in place (and cleans empty folders), so the flag is safe to toggle on an already-downloaded playlist. **During the sync pass it also re-writes ID3 tags from the CSV row**, so manual edits to `index.csv` (e.g., fixing a wrong BPM) propagate into the file's tags + folder location on the next run.

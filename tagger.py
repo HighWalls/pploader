@@ -1,13 +1,19 @@
 """Write ID3 tags that DJ software reads: TBPM, TKEY, TIT2, TPE1, TALB, COMM.
 
-TKEY format is configurable: 'camelot' (e.g. '8A') for Rekordbox, or
-'musical' (e.g. 'Am') for Traktor / Serato. The COMM field always carries
-both formats so the file is portable across software.
+Both key formats are always written to the file:
+- TKEY: holds whichever format the user picked ('8A' or 'Am'). This is
+  the frame Rekordbox/Traktor/Serato display by default.
+- TXXX:CAMELOT_KEY: always the Camelot value, regardless of user choice.
+- TXXX:MUSICAL_KEY: always the short musical value, regardless of user choice.
+- COMM: human-readable summary with both forms.
+
+This means the file is portable across DJ software no matter the user's
+TKEY preference — every tool can find the format it wants in some frame.
 """
 
 from pathlib import Path
 
-from mutagen.id3 import COMM, ID3, ID3NoHeaderError, TALB, TBPM, TIT2, TKEY, TPE1
+from mutagen.id3 import COMM, ID3, ID3NoHeaderError, TALB, TBPM, TIT2, TKEY, TPE1, TXXX
 
 from camelot import musical_key_short
 
@@ -32,8 +38,16 @@ def tag_file(
     tags["TPE1"] = TPE1(encoding=3, text=artist)
     tags["TALB"] = TALB(encoding=3, text=album)
     tags["TBPM"] = TBPM(encoding=3, text=str(bpm))
-    tkey_value = musical_key_short(key_name) if key_format == "musical" else camelot
+
+    musical = musical_key_short(key_name) if key_name else ""
+    tkey_value = musical if key_format == "musical" else camelot
     tags["TKEY"] = TKEY(encoding=3, text=tkey_value)
+
+    if camelot:
+        tags["TXXX:CAMELOT_KEY"] = TXXX(encoding=3, desc="CAMELOT_KEY", text=camelot)
+    if musical:
+        tags["TXXX:MUSICAL_KEY"] = TXXX(encoding=3, desc="MUSICAL_KEY", text=musical)
+
     tags["COMM"] = COMM(
         encoding=3, lang="eng", desc="", text=f"{camelot} | {bpm} BPM | {key_name}"
     )

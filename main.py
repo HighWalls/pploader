@@ -2,8 +2,13 @@
 
 Accepts playlist URLs (all three platforms) or single track / video URLs
 (Spotify track, YouTube video, SoundCloud track). Singles land in a `singles/`
-subfolder under --out. Key format in tags + filename is selectable (Camelot
-for Rekordbox, musical notation for Traktor / Serato).
+subfolder under --out.
+
+Both Camelot ('8A') and musical ('Am') notation are always written to ID3
+in dedicated frames. --key-format controls which format goes into the
+primary TKEY frame and the filename's leading prefix; the other format is
+still in TXXX:MUSICAL_KEY / TXXX:CAMELOT_KEY. Existing files keep their
+current format on syncs unless --migrate-keys is passed explicitly.
 
 Usage:
     python main.py <url>
@@ -11,6 +16,7 @@ Usage:
         [--limit N] [--skip-existing]
         [--bucket-by-bpm] [--reanalyze]
         [--key-format camelot|musical]
+        [--migrate-keys]
 """
 
 import argparse
@@ -227,6 +233,33 @@ def _row_bpm_int(row: dict) -> int | None:
         return None
 
 
+_CAMELOT_RE = re.compile(r"^\d{1,2}[AB]$")
+_MUSICAL_RE = re.compile(r"^[A-G][#b]?m?$")
+
+
+def _classify_key_format(s: str) -> str | None:
+    """'8A' -> 'camelot', 'Am' -> 'musical', anything else -> None."""
+    if not s:
+        return None
+    if _CAMELOT_RE.match(s):
+        return "camelot"
+    if _MUSICAL_RE.match(s):
+        return "musical"
+    return None
+
+
+def _existing_tkey_format(mp3_path: Path) -> str | None:
+    """Read the file's TKEY value and classify which format it's in.
+    Returns 'camelot', 'musical', or None (no TKEY / unrecognized value)."""
+    try:
+        tags = ID3(mp3_path)
+    except (ID3NoHeaderError, Exception):
+        return None
+    if "TKEY" not in tags:
+        return None
+    return _classify_key_format(str(tags["TKEY"].text[0]))
+
+
 def _key_prefix(camelot: str, key_name: str, key_format: str) -> str:
     """The string used as the filename's leading key chunk: '8A' or 'Am'."""
     if key_format == "musical" and key_name:
@@ -263,9 +296,19 @@ def _find_disk_file(row: dict, by_name: dict[str, Path], all_paths: list[Path]) 
     return None
 
 
-def reanalyze_rows(rows: list[dict], out_dir: Path, key_format: str = "camelot") -> int:
+def reanalyze_rows(
+    rows: list[dict],
+    out_dir: Path,
+    key_format: str = "camelot",
+    migrate_keys: bool = False,
+) -> int:
     """Re-run BPM/key analysis on each row's MP3. Updates the row dict in place,
     rewrites ID3 tags, and renames the file if the key/bpm prefix changed.
+
+    Each file's TKEY notation is preserved (the file gets new BPM/key values
+    in the same format it was originally tagged with) unless `migrate_keys`
+    is set, in which case every file is forced to `key_format`.
+
     Returns the count of rows whose values actually changed."""
     all_paths = list(out_dir.rglob("*.mp3"))
     by_name: dict[str, Path] = {p.name: p for p in all_paths}
@@ -281,6 +324,12 @@ def reanalyze_rows(rows: list[dict], out_dir: Path, key_format: str = "camelot")
             continue
         if str(row.get("bpm") or "") == str(result.bpm) and (row.get("camelot") or "") == result.camelot:
             continue
+        # Preserve the file's existing TKEY format unless caller asked to migrate.
+        effective_format = key_format
+        if not migrate_keys:
+            detected = _existing_tkey_format(current)
+            if detected:
+                effective_format = detected
         try:
             tag_file(
                 current,
@@ -290,12 +339,12 @@ def reanalyze_rows(rows: list[dict], out_dir: Path, key_format: str = "camelot")
                 bpm=result.bpm,
                 camelot=result.camelot,
                 key_name=result.key_name,
-                key_format=key_format,
+                key_format=effective_format,
             )
         except Exception as e:
             tqdm.write(f"  ! retag failed ({e}): {current.name}")
             continue
-        prefix = _key_prefix(result.camelot, result.key_name, key_format)
+        prefix = _key_prefix(result.camelot, result.key_name, effective_format)
         new_name = (
             safe_filename(
                 f"{prefix} - {result.bpm:03d} - "
@@ -353,9 +402,17 @@ def main() -> int:
         "--key-format",
         choices=["camelot", "musical"],
         default="camelot",
-        help="Key format for the ID3 TKEY tag and filename prefix. "
+        help="Key format for new downloads' TKEY tag and filename prefix. "
              "'camelot' (default, Rekordbox) writes '8A'. "
-             "'musical' (Traktor / Serato) writes 'Am'.",
+             "'musical' (Traktor / Serato) writes 'Am'. Existing files keep "
+             "their current format unless --migrate-keys is also passed.",
+    )
+    ap.add_argument(
+        "--migrate-keys",
+        action="store_true",
+        help="On bucket-sync / reanalyze, force every existing file's TKEY tag "
+             "and filename prefix to the chosen --key-format. Without this, "
+             "files keep the format they were originally tagged with.",
     )
     args = ap.parse_args()
     if args.reanalyze:
@@ -418,7 +475,12 @@ def main() -> int:
 
     if args.reanalyze and existing:
         print(f"Reanalyzing {len(existing)} existing tracks...")
-        n_changed = reanalyze_rows(list(existing.values()), out_dir, key_format=args.key_format)
+        n_changed = reanalyze_rows(
+            list(existing.values()),
+            out_dir,
+            key_format=args.key_format,
+            migrate_keys=args.migrate_keys,
+        )
         print(f"  → {n_changed}/{len(existing)} rows updated")
 
     rows: list[dict] = list(existing.values())
@@ -460,6 +522,14 @@ def main() -> int:
             if current is None:
                 continue
             bpm_int = _row_bpm_int(row)
+            # Per-file: preserve the file's current TKEY format unless caller
+            # asked to migrate. New downloads (no TKEY yet) and unrecognized
+            # values fall through to args.key_format.
+            effective_format = args.key_format
+            if not args.migrate_keys:
+                detected = _existing_tkey_format(current)
+                if detected:
+                    effective_format = detected
             # Re-tag from row values (propagates CSV edits + reanalyze updates)
             if bpm_int is not None and row.get("camelot"):
                 try:
@@ -471,14 +541,25 @@ def main() -> int:
                         bpm=bpm_int,
                         camelot=row["camelot"],
                         key_name=row.get("key", "") or "",
-                        key_format=args.key_format,
+                        key_format=effective_format,
                     )
                     retagged += 1
                 except Exception as e:
                     tqdm.write(f"  ! retag failed ({e}): {current.name}")
                     continue
-            # Rename the file to the canonical name for its row values.
-            expected_name = _expected_filename(row, key_format=args.key_format) or current.name
+            # Filename: accept either Camelot- or musical-prefixed name as
+            # valid (so changing --key-format mid-library doesn't trigger
+            # mass rename). Only rename if the current name doesn't match
+            # any valid form, or if caller explicitly asked to migrate.
+            valid_names = {
+                _expected_filename(row, key_format="camelot"),
+                _expected_filename(row, key_format="musical"),
+            }
+            valid_names.discard(None)
+            if args.migrate_keys or current.name not in valid_names:
+                expected_name = _expected_filename(row, key_format=args.key_format) or current.name
+            else:
+                expected_name = current.name
             if current.name != expected_name:
                 new_path = current.parent / expected_name
                 try:
